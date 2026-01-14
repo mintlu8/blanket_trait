@@ -1,37 +1,58 @@
 #![doc = include_str!("../README.md")]
-use proc_macro::TokenStream;
-use quote::quote;
-use syn::{
-    Attribute, Generics, ImplItem, ImplItemConst, ImplItemFn, ImplItemType, ItemImpl, ItemTrait,
-    Path, Token, Type, Visibility, WhereClause, parse::Parse, parse_macro_input, spanned::Spanned,
-};
+use proc_macro::{Delimiter, Group, Punct, Spacing, Span, TokenStream, TokenTree};
 
-struct ItemImplHeader {
-    pub attrs: Vec<Attribute>,
-    pub unsafety: Option<Token![unsafe]>,
-    pub impl_token: Token![impl],
-    pub generics: Generics,
-    pub path: Path,
-    pub for_: Token![for],
-    pub self_ty: Box<Type>,
+trait TokenTreeExt {
+    fn is_brace(&self) -> bool;
+    fn braced_group(&self) -> Option<&Group>;
+    fn is(&self, c: char) -> bool;
+    fn is_new_item_trait(&self) -> bool;
 }
 
-impl Parse for ItemImplHeader {
-    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        let mut header = ItemImplHeader {
-            attrs: input.call(Attribute::parse_outer)?,
-            unsafety: input.parse()?,
-            impl_token: input.parse()?,
-            // This never parses the where clause
-            generics: input.parse()?,
-            path: input.parse()?,
-            for_: input.parse()?,
-            self_ty: input.parse()?,
-        };
-        let where_clause: Option<WhereClause> = input.parse()?;
-        header.generics.where_clause = where_clause;
-        Ok(header)
+impl TokenTreeExt for TokenTree {
+    fn is_brace(&self) -> bool {
+        if let TokenTree::Group(g) = self && g.delimiter() == Delimiter::Brace {
+            true
+        } else {
+            false
+        }
     }
+
+    fn braced_group(&self) -> Option<&Group> {
+        if let TokenTree::Group(g) = self && g.delimiter() == Delimiter::Brace {
+            Some(g)
+        } else {
+            None
+        }
+    }
+
+    fn is(&self, c: char) -> bool {
+        if let TokenTree::Punct(p) = self && p.as_char() == c {
+            true
+        } else {
+            false
+        }
+    }
+
+    fn is_new_item_trait(&self) -> bool {
+        if let TokenTree::Ident(p) = self  {
+            let p = p.to_string();
+            p == "fn" || p == "const" || p == "type"
+        } else {
+            false
+        }
+    }
+}
+
+fn semi(span: Span) -> TokenTree {
+    let mut semi = TokenTree::Punct(Punct::new(';', Spacing::Alone));
+    semi.set_span(span);
+    semi
+}
+
+fn braced(tokens: TokenStream, span: Span) -> TokenTree {
+    let mut braced = TokenTree::Group(Group::new(Delimiter::Brace, tokens));
+    braced.set_span(span);
+    braced
 }
 
 /// Generate a trait with a blanket implementation.
@@ -99,88 +120,38 @@ impl Parse for ItemImplHeader {
 /// ```
 ///
 #[proc_macro_attribute]
-pub fn blanket_trait(first: TokenStream, tokens: TokenStream) -> TokenStream {
-    let header = parse_macro_input!(first as ItemImplHeader);
-    let mut trait_block = parse_macro_input!(tokens as ItemTrait);
-
-    let mut items = Vec::new();
-
-    for item in &mut trait_block.items {
-        match item {
-            syn::TraitItem::Macro(_) => (),
-            syn::TraitItem::Verbatim(_) => (),
-            syn::TraitItem::Fn(f) => {
-                let Some(block) = f.default.take() else {
-                    return syn::Error::new(f.span(), "Expected function body")
-                        .into_compile_error()
-                        .into();
-                };
-                items.push(ImplItem::Fn(ImplItemFn {
-                    attrs: f.attrs.clone(),
-                    vis: Visibility::Inherited,
-                    defaultness: None,
-                    sig: f.sig.clone(),
-                    block,
-                }));
+pub fn blanket_trait(impl_header: TokenStream, tokens: TokenStream) -> TokenStream {
+    let mut impl_block: Vec<_> = impl_header.into_iter().collect();
+    let mut trait_block = Vec::new();
+    for tt in tokens {
+        let span = tt.span();
+        if let Some(g) = tt.braced_group() {
+            let mut impl_block_inner = Vec::new();
+            let mut trait_block_inner = Vec::new();
+            let mut is_default_member = false;
+            for tt in g.stream() {
+                if tt.is_brace() {
+                    trait_block_inner.push(semi(tt.span()));
+                    impl_block_inner.push(tt);
+                } else if tt.is('=') {
+                    is_default_member = true;
+                    impl_block_inner.push(tt);
+                } else if is_default_member && (tt.is(';') || tt.is_new_item_trait()) {
+                    is_default_member = false;
+                    trait_block_inner.push(tt.clone());
+                    impl_block_inner.push(tt);
+                } else if is_default_member {
+                    impl_block_inner.push(tt);
+                } else {
+                    trait_block_inner.push(tt.clone());
+                    impl_block_inner.push(tt);
+                }
             }
-            syn::TraitItem::Type(t) => {
-                let Some((eq_token, ty)) = t.default.take() else {
-                    return syn::Error::new(t.span(), "Expected default value.")
-                        .into_compile_error()
-                        .into();
-                };
-                items.push(ImplItem::Type(ImplItemType {
-                    attrs: t.attrs.clone(),
-                    vis: Visibility::Inherited,
-                    defaultness: None,
-                    type_token: t.type_token,
-                    ident: t.ident.clone(),
-                    generics: t.generics.clone(),
-                    eq_token,
-                    ty,
-                    semi_token: t.semi_token,
-                }));
-            }
-            syn::TraitItem::Const(c) => {
-                let Some((eq_token, expr)) = c.default.take() else {
-                    return syn::Error::new(c.span(), "Expected default value.")
-                        .into_compile_error()
-                        .into();
-                };
-                items.push(ImplItem::Const(ImplItemConst {
-                    attrs: c.attrs.clone(),
-                    vis: Visibility::Inherited,
-                    defaultness: None,
-                    const_token: c.const_token,
-                    ident: c.ident.clone(),
-                    generics: c.generics.clone(),
-                    colon_token: c.colon_token,
-                    ty: c.ty.clone(),
-                    eq_token,
-                    expr,
-                    semi_token: c.semi_token,
-                }));
-            }
-            _ => (),
+            trait_block.push(braced(trait_block_inner.into_iter().collect(), span));
+            impl_block.push(braced(impl_block_inner.into_iter().collect(), span));
+        } else {
+            trait_block.push(tt);
         }
     }
-
-    let out_impl = ItemImpl {
-        attrs: header.attrs,
-        defaultness: None,
-        unsafety: header.unsafety,
-        impl_token: header.impl_token,
-        generics: header.generics,
-        trait_: Some((None, header.path, header.for_)),
-        self_ty: header.self_ty,
-        brace_token: trait_block.brace_token,
-        items,
-    };
-
-    quote! {
-        #trait_block
-
-        #out_impl
-    }
-    .into()
+    trait_block.into_iter().chain(impl_block).collect()
 }

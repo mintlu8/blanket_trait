@@ -20,3 +20,11 @@ pub trait C {
         self.aa()
     }
 }
+
+#[blanket_trait(impl<T: A> D for T where T::AA: Send)]
+pub trait D {
+    type X = T::AA;
+    fn a(&self) -> i32 {
+        self.aa()
+    }
+}

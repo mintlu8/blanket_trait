@@ -129,20 +129,28 @@ pub fn blanket_trait(impl_header: TokenStream, tokens: TokenStream) -> TokenStre
             let mut impl_block_inner = Vec::new();
             let mut trait_block_inner = Vec::new();
             let mut is_default_member = false;
+            let mut angle_bracket_depth = 0;
             for tt in g.stream() {
                 if tt.is_brace() {
                     trait_block_inner.push(semi(tt.span()));
                     impl_block_inner.push(tt);
-                } else if tt.is('=') {
+                } else if angle_bracket_depth <= 0 && tt.is('=')  {
                     is_default_member = true;
                     impl_block_inner.push(tt);
                 } else if is_default_member && (tt.is(';') || tt.is_new_item_trait()) {
                     is_default_member = false;
                     trait_block_inner.push(tt.clone());
                     impl_block_inner.push(tt);
+                    angle_bracket_depth = 0;
                 } else if is_default_member {
                     impl_block_inner.push(tt);
                 } else {
+                    if tt.is('<') {
+                        angle_bracket_depth += 1;
+                    // maybe inaccurate way to ignore the ->
+                    } else if tt.is('>') && angle_bracket_depth > 0 {
+                        angle_bracket_depth -= 1;
+                    }
                     trait_block_inner.push(tt.clone());
                     impl_block_inner.push(tt);
                 }

@@ -28,3 +28,15 @@ pub trait D {
         self.aa()
     }
 }
+
+
+pub trait X {
+    fn a(&mut self) -> impl Future<Output = i32>;
+}
+
+#[blanket_trait(impl<T: X> Y for T)]
+pub trait Y {
+    fn b(&mut self) -> impl Future<Output = i32> {
+        X::a(self)
+    }
+}
